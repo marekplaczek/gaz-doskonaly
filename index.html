@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="pl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Gaz 2D</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0c0c10; color:#e8e8f0; }
+    .wrap { display: grid; grid-template-columns: 1fr 320px; gap: 12px; padding: 12px; height: 100vh; box-sizing: border-box; }
+    canvas { width: 100%; height: 100%; background:#0f1016; border: 2px solid rgba(255,255,255,0.18); border-radius: 12px; display:block; }
+    .panel { border: 1px solid rgba(255,255,255,0.16); border-radius: 12px; padding: 12px; background: rgba(255,255,255,0.03); }
+    .panel h2 { margin: 0 0 10px 0; font-size: 16px; font-weight: 650; }
+    .row { margin: 10px 0; }
+    label { display:block; font-size: 12px; opacity: 0.9; margin-bottom: 6px; }
+    input[type="range"] { width: 100%; }
+    .btns { display:flex; gap:8px; flex-wrap: wrap; }
+    button { background:#1b1d2a; color:#e8e8f0; border:1px solid rgba(255,255,255,0.18); border-radius: 10px; padding: 8px 10px; cursor:pointer; }
+    button:hover { background:#22253a; }
+    .kv { font-size: 12px; line-height: 1.5; opacity: 0.92; }
+    .kv b { font-weight: 700; }
+    .small { font-size: 11px; opacity: 0.8; }
+    .sep { height: 1px; background: rgba(255,255,255,0.12); margin: 10px 0; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div style="min-width:0; min-height:0;">
+    <canvas id="cv"></canvas>
+  </div>
+
+  <div class="panel">
+    <h2>Gaz 2D</h2>
+
+    <div class="kv">
+      <div><b>SPACE</b> pauza/start</div>
+      <div><b>R</b> reset</div>
+      <div><b>H</b> HUD</div>
+    </div>
+
+    <div class="sep"></div>
+
+    <div class="row">
+      <label>Liczba kul N: <span id="nVal"></span></label>
+      <input id="n" type="range" min="50" max="1200" step="10" value="300">
+    </div>
+
+    <div class="row">
+      <label>Promień r: <span id="rVal"></span></label>
+      <input id="r" type="range" min="2" max="12" step="1" value="6">
+    </div>
+
+    <div class="row">
+      <label>Prędkość v0: <span id="vVal"></span></label>
+      <input id="v0" type="range" min="50" max="600" step="10" value="220">
+    </div>
+
+    <div class="row">
+      <label>Subkroki: <span id="subVal"></span></label>
+      <input id="sub" type="range" min="1" max="8" step="1" value="2">
+    </div>
+
+    <div class="row">
+      <label>EMA α: <span id="alphaVal"></span></label>
+      <input id="alpha" type="range" min="0.02" max="0.50" step="0.01" value="0.15">
+    </div>
+
+    <div class="btns">
+      <button id="reset">Reset</button>
+      <button id="pause">Pauza</button>
+      <button id="kick">Dodaj energii</button>
+      <button id="cool">Schłodź</button>
+    </div>
+
+    <div class="sep"></div>
+    <div class="kv" id="stats"></div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const cv = document.getElementById('cv');
+  const ctx = cv.getContext('2d');
+
+  function fitCanvas() {
+    const dpr = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+    const rect = cv.getBoundingClientRect();
+    cv.width = Math.floor(rect.width * dpr);
+    cv.height = Math.floor(rect.height * dpr);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+  }
+  window.addEventListener('resize', fitCanvas);
+  fitCanvas();
+
+  const elN = document.getElementById('n');
+  const elR = document.getElementById('r');
+  const elV0 = document.getElementById('v0');
+  const elSub = document.getElementById('sub');
+  const elAlpha = document.getElementById('alpha');
+
+  const nVal = document.getElementById('nVal');
+  const rVal = document.getElementById('rVal');
+  const vVal = document.getElementById('vVal');
+  const subVal = document.getElementById('subVal');
+  const alphaVal = document.getElementById('alphaVal');
+
+  const btnReset = document.getElementById('reset');
+  const btnPause = document.getElementById('pause');
+  const btnKick = document.getElementById('kick');
+  const btnCool = document.getElementById('cool');
+  const statsEl = document.getElementById('stats');
+
+  function syncLabels() {
+    nVal.textContent = elN.value;
+    rVal.textContent = elR.value;
+    vVal.textContent = elV0.value;
+    subVal.textContent = elSub.value;
+    alphaVal.textContent = (+elAlpha.value).toFixed(2);
+  }
+  [elN, elR, elV0, elSub, elAlpha].forEach(e => e.addEventListener('input', syncLabels));
+  syncLabels();
+
+  const rng = (a,b) => a + Math.random()*(b-a);
+
+  class Ball {
+    constructor(x,y,vx,vy,r,m=1) {
+      this.x=x; this.y=y; this.vx=vx; this.vy=vy; this.r=r; this.m=m;
+    }
+  }
+
+  const state = {
+    balls: [],
+    paused: false,
+    showHud: true,
+    boxMin: 0,
+    boxMaxX: 0,
+    boxMaxY: 0,
+    impulseSum: 0,
+    timeSum: 0,
+    windowTime: 0.25,
+    pInstant: 0,
+    pEma: 0,
+    emaAlpha: +elAlpha.value,
+    fps: 0,
+    _fpsAcc: 0,
+    _fpsT: 0,
+  };
+
+  function resetSimulation() {
+    const rect = cv.getBoundingClientRect();
+    const W = rect.width;
+    const H = rect.height;
+
+    state.boxMin = 0;
+    state.boxMaxX = W;
+    state.boxMaxY = H;
+
+    const N = +elN.value;
+    const r = +elR.value;
+    const v0 = +elV0.value;
+
+    state.balls = [];
+    state.impulseSum = 0;
+    state.timeSum = 0;
+    state.pInstant = 0;
+    state.pEma = 0;
+    state.emaAlpha = +elAlpha.value;
+
+    let tries = 0;
+    const maxTries = Math.max(20000, N * 200);
+
+    while (state.balls.length < N && tries < maxTries) {
+      tries++;
+      const x = rng(r, W - r);
+      const y = rng(r, H - r);
+
+      let ok = true;
+      for (const b of state.balls) {
+        const dx = b.x - x, dy = b.y - y;
+        if (dx*dx + dy*dy < (2*r)*(2*r)) { ok = false; break; }
+      }
+      if (!ok) continue;
+
+      const ang = rng(0, Math.PI*2);
+      state.balls.push(new Ball(x,y,Math.cos(ang)*v0,Math.sin(ang)*v0,r,1));
+    }
+  }
+
+  btnReset.onclick = resetSimulation;
+
+  btnPause.onclick = () => {
+    state.paused = !state.paused;
+    btnPause.textContent = state.paused ? "Start" : "Pauza";
+  };
+
+  btnKick.onclick = () => {
+    for (const b of state.balls) { b.vx *= 1.15; b.vy *= 1.15; }
+  };
+
+  btnCool.onclick = () => {
+    for (const b of state.balls) { b.vx *= 0.87; b.vy *= 0.87; }
+  };
+
+  window.addEventListener('keydown', e => {
+    if (e.code === 'Space') {
+      e.preventDefault();
+      btnPause.click();
+    } else if (e.key === 'r' || e.key === 'R') {
+      resetSimulation();
+    } else if (e.key === 'h' || e.key === 'H') {
+      state.showHud = !state.showHud;
+    }
+  });
+
+  function buildGrid(balls, cellSize) {
+    const grid = new Map();
+    for (let i=0;i<balls.length;i++) {
+      const b = balls[i];
+      const cx = Math.floor(b.x / cellSize);
+      const cy = Math.floor(b.y / cellSize);
+      const k = cx + "," + cy;
+      if (!grid.has(k)) grid.set(k, []);
+      grid.get(k).push(i);
+    }
+    return grid;
+  }
+
+  function resolvePair(a,b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const minDist = a.r + b.r;
+    const d2 = dx*dx + dy*dy;
+    if (d2 === 0 || d2 >= minDist*minDist) return;
+
+    const d = Math.sqrt(d2);
+    const nx = dx/d, ny = dy/d;
+    const overlap = minDist - d;
+
+    const invA = 1/a.m, invB = 1/b.m, invS = invA + invB;
+    a.x -= nx * overlap * (invA/invS);
+    a.y -= ny * overlap * (invA/invS);
+    b.x += nx * overlap * (invB/invS);
+    b.y += ny * overlap * (invB/invS);
+
+    const closing = (b.vx - a.vx)*nx + (b.vy - a.vy)*ny;
+    if (closing <= 0) return;
+
+    const j = (2*closing)/invS;
+    const ix = j*nx, iy = j*ny;
+    a.vx += ix*invA; a.vy += iy*invA;
+    b.vx -= ix*invB; b.vy -= iy*invB;
+  }
+
+  function reflectWalls(b) {
+    if (b.x - b.r < state.boxMin) {
+      b.x = state.boxMin + b.r;
+      state.impulseSum += 2*Math.abs(b.vx);
+      b.vx *= -1;
+    } else if (b.x + b.r > state.boxMaxX) {
+      b.x = state.boxMaxX - b.r;
+      state.impulseSum += 2*Math.abs(b.vx);
+      b.vx *= -1;
+    }
+
+    if (b.y - b.r < state.boxMin) {
+      b.y = state.boxMin + b.r;
+      state.impulseSum += 2*Math.abs(b.vy);
+      b.vy *= -1;
+    } else if (b.y + b.r > state.boxMaxY) {
+      b.y = state.boxMaxY - b.r;
+      state.impulseSum += 2*Math.abs(b.vy);
+      b.vy *= -1;
+    }
+  }
+
+  function step(dt) {
+    for (const b of state.balls) {
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+      reflectWalls(b);
+    }
+
+    const r = +elR.value;
+    const cellSize = Math.max(2*r*2.5, 8);
+    const grid = buildGrid(state.balls, cellSize);
+    const checked = new Set();
+
+    for (const [key, ids] of grid.entries()) {
+      const [cx, cy] = key.split(',').map(Number);
+      for (let dx=-1;dx<=1;dx++) for (let dy=-1;dy<=1;dy++) {
+        const nk = (cx+dx)+","+(cy+dy);
+        if (!grid.has(nk)) continue;
+        const pk = key < nk ? key+"|"+nk : nk+"|"+key;
+        if (checked.has(pk)) continue;
+        checked.add(pk);
+        for (const i of ids) for (const j of grid.get(nk)) if (i<j) resolvePair(state.balls[i],state.balls[j]);
+      }
+    }
+
+    state.timeSum += dt;
+    if (state.timeSum >= state.windowTime) {
+      const rect = cv.getBoundingClientRect();
+      const L = 2*(rect.width+rect.height);
+      state.pInstant = (state.impulseSum/state.timeSum)/L;
+      const a = state.emaAlpha;
+      state.pEma = state.pEma===0 ? state.pInstant : (1-a)*state.pEma + a*state.pInstant;
+      state.impulseSum = 0;
+      state.timeSum = 0;
+    }
+  }
+
+  function stats() {
+    let ke=0, px=0, py=0;
+    for (const b of state.balls) {
+      ke += 0.5*(b.vx*b.vx + b.vy*b.vy);
+      px += b.vx; py += b.vy;
+    }
+    return { ke, T: ke/Math.max(1,state.balls.length), p: Math.hypot(px,py) };
+  }
+
+  function draw() {
+    const rect = cv.getBoundingClientRect();
+    const W = rect.width, H = rect.height;
+
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle="#0f1016"; ctx.fillRect(0,0,W,H);
+    ctx.strokeStyle="rgba(255,255,255,0.18)"; ctx.lineWidth=2;
+    ctx.strokeRect(1,1,W-2,H-2);
+
+    ctx.fillStyle="rgba(235,235,255,0.96)";
+    for (const b of state.balls) {
+      ctx.beginPath();
+      ctx.arc(b.x,b.y,b.r,0,Math.PI*2);
+      ctx.fill();
+    }
+
+    if (state.showHud) {
+      const s = stats();
+      ctx.fillStyle="rgba(0,0,0,0.35)";
+      ctx.fillRect(10,10,320,78);
+      ctx.fillStyle="rgba(255,255,255,0.92)";
+      ctx.font="13px system-ui";
+      ctx.fillText(`N=${state.balls.length} KE=${s.ke.toFixed(1)} |p|=${s.p.toFixed(3)} T~=${s.T.toFixed(3)}`,18,32);
+      ctx.fillText(`P(inst)=${state.pInstant.toExponential(3)} P(avg)=${state.pEma.toExponential(3)}`,18,54);
+      ctx.fillText(`FPS≈${state.fps.toFixed(0)} sub=${elSub.value}`,18,76);
+
+      statsEl.innerHTML =
+        `<div><b>N</b>: ${state.balls.length}</div>
+         <div><b>KE</b>: ${s.ke.toFixed(2)}</div>
+         <div><b>T~</b>: ${s.T.toFixed(4)}</div>
+         <div><b>|p|</b>: ${s.p.toFixed(4)}</div>
+         <div><b>P(inst)</b>: ${state.pInstant.toExponential(4)}</div>
+         <div><b>P(avg)</b>: ${state.pEma.toExponential(4)}</div>
+         <div><b>FPS</b>: ${state.fps.toFixed(0)}</div>`;
+    }
+  }
+
+  let last = performance.now();
+  function loop(now) {
+    const dtReal = Math.min(0.05,(now-last)/1000);
+    last = now;
+
+    state._fpsAcc++; state._fpsT += dtReal;
+    if (state._fpsT >= 0.5) {
+      state.fps = state._fpsAcc/state._fpsT;
+      state._fpsAcc=0; state._fpsT=0;
+    }
+
+    if (!state.paused) {
+      const sub = +elSub.value;
+      const dt = dtReal/sub;
+      const r = +elR.value;
+      for (const b of state.balls) b.r = r;
+      for (let i=0;i<sub;i++) step(dt);
+    }
+
+    draw();
+    requestAnimationFrame(loop);
+  }
+
+  elN.onchange = resetSimulation;
+  elR.onchange = resetSimulation;
+
+  resetSimulation();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
